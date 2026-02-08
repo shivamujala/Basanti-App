@@ -62,6 +62,9 @@ dependencies {
     implementation libs.coil.compose
     implementation libs.youtube.player
     
+    // Lottie Animation
+    implementation libs.lottie.compose
+    
     // Media3 dependencies
     implementation libs.androidx.media3.exoplayer
     implementation libs.androidx.media3.exoplayer.hls

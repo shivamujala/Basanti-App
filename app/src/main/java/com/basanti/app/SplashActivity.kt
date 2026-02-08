@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -16,6 +17,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.airbnb.lottie.compose.*
 import com.google.firebase.auth.FirebaseAuth
 import kotlinx.coroutines.delay
 
@@ -28,7 +30,8 @@ class SplashActivity : ComponentActivity() {
             SplashUI()
 
             LaunchedEffect(Unit) {
-                delay(2000)
+                // Splash screen ko 3 seconds tak dikhane ke liye delay 3000ms kiya hai
+                delay(3000)
                 checkLoginAndNavigate()
             }
         }
@@ -54,12 +57,22 @@ fun SplashUI() {
         )
     )
 
+    // Lottie animation setup
+    val composition by rememberLottieComposition(LottieCompositionSpec.RawRes(R.raw.trail_loading))
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(gradient),
         contentAlignment = Alignment.Center
     ) {
+        // Animation ko center mein dikhane ke liye
+        LottieAnimation(
+            composition = composition,
+            iterations = LottieConstants.IterateForever,
+            modifier = Modifier.size(250.dp)
+        )
+
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
