@@ -4,8 +4,11 @@
     <!-- SPLASH THEME -->
     <style name="Theme.Basanti.Splash"
         parent="Theme.Material3.DayNight.NoActionBar">
-        <item name="android:windowBackground">@android:color/white</item>
+        <!-- Using the gradient drawable instead of a single color -->
+        <item name="android:windowBackground">@drawable/splash_gradient</item>
         <item name="android:windowFullscreen">true</item>
+        <!-- For Android 12+, this hides the default center icon by making it transparent -->
+        <item name="android:windowSplashScreenAnimatedIcon" tools:ignore="NewApi" xmlns:tools="http://schemas.android.com/tools">@android:color/transparent</item>
     </style>
 
     <!-- MAIN APP THEME -->
