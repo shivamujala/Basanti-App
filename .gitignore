@@ -13,3 +13,7 @@
 .externalNativeBuild
 .cxx
 local.properties
+*.log
+.idea/
+build/
+*.apk
