@@ -811,9 +811,13 @@ fun MovieRequestScreen() {
 
                     isSubmitting = true
                     
+                    // Capture current state values into constants for background task
+                    val currentMovieTitle = movieTitle
+                    val currentSelectedTmdbMovie = selectedTmdbMovie
+                    
                     fun saveToFirestore(finalScreenshotUrl: String = "") {
-                        val tmdbID = selectedTmdbMovie?.id ?: 0
-                        val mediaType = selectedTmdbMovie?.media_type ?: "movie"
+                        val tmdbID = currentSelectedTmdbMovie?.id ?: 0
+                        val mediaType = currentSelectedTmdbMovie?.media_type ?: "movie"
                         val tmdbUrl = if (tmdbID != 0) {
                             if (mediaType == "tv") "https://www.themoviedb.org/tv/$tmdbID"
                             else "https://www.themoviedb.org/movie/$tmdbID"
@@ -825,11 +829,11 @@ fun MovieRequestScreen() {
                             "lastName" to userLastName,
                             "phoneNumber" to userPhone,
                             "email" to userEmail,
-                            "movieTitle" to movieTitle,
+                            "movieTitle" to currentMovieTitle,
                             "tmdbID" to tmdbID,
                             "mediaType" to mediaType,
                             "tmdbUrl" to tmdbUrl,
-                            "posterUrl" to (selectedTmdbMovie?.fullPosterUrl ?: ""),
+                            "posterUrl" to (currentSelectedTmdbMovie?.fullPosterUrl ?: ""),
                             "screenshotUrl" to finalScreenshotUrl,
                             "message" to requestMsg,
                             "timestamp" to com.google.firebase.Timestamp.now(),
@@ -860,9 +864,11 @@ fun MovieRequestScreen() {
                                                 val videoData = mapOf(
                                                     "userID" to (auth.currentUser?.uid ?: ""),
                                                     "requestID" to docRef.id,
-                                                    "title" to movieTitle,
+                                                    "title" to currentMovieTitle,
                                                     "videoUrl" to vidkingUrl,
-                                                    "thumbnailUrl" to (selectedTmdbMovie?.fullBackdropUrl ?: selectedTmdbMovie?.fullPosterUrl ?: "")
+                                                    "thumbnailUrl" to (currentSelectedTmdbMovie?.fullBackdropUrl 
+                                                        ?: currentSelectedTmdbMovie?.fullPosterUrl 
+                                                        ?: finalScreenshotUrl) // Fallback to screenshot URL
                                                 )
                                                 db.collection("videos").add(videoData)
                                             }
