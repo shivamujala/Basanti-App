@@ -16,6 +16,8 @@ import android.os.Bundle
 import android.os.Environment
 import android.util.Log
 import android.view.ViewGroup
+import android.webkit.WebChromeClient
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
@@ -87,20 +89,28 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import com.google.firebase.remoteconfig.FirebaseRemoteConfig
 import com.google.firebase.remoteconfig.remoteConfigSettings
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import java.io.File
 import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 
 @Keep
 data class Video(
     val id: String = "",
     val userID: String = "",
+    val requestID: String = "",
     val title: String = "",
     val videoUrl: String = "",
     val thumbnailUrl: String = ""
@@ -366,6 +376,7 @@ fun MovieRequestScreen() {
 
     val currentUid = auth.currentUser?.uid ?: ""
     val previousRequests = remember { mutableStateListOf<MovieRequest>() }
+    var showLimitDialog by remember { mutableStateOf(false) }
 
     // Use Snapshot Listener for Real-time updates
     DisposableEffect(currentUid) {
@@ -446,7 +457,9 @@ fun MovieRequestScreen() {
                     showNotFoundDialog = true
                 }
             } catch (e: Exception) {
-                Log.e("TMDB_ERROR", "Search failed: ${e.message}", e)
+                if (e !is CancellationException) {
+                    Log.e("TMDB_ERROR", "Search failed: ${e.message}")
+                }
             } finally {
                 isSearchingTmdb = false
             }
@@ -455,6 +468,19 @@ fun MovieRequestScreen() {
             searchResults = emptyList()
             isSearchingTmdb = false
         }
+    }
+
+    if (showLimitDialog) {
+        AlertDialog(
+            onDismissRequest = { showLimitDialog = false },
+            title = { Text("Request Limit Reached", fontWeight = FontWeight.Bold) },
+            text = { Text("Please wait, as there are already three movie requests in the queue. You can submit more once your current requests are processed.") },
+            confirmButton = {
+                TextButton(onClick = { showLimitDialog = false }) {
+                    Text("OK")
+                }
+            }
+        )
     }
 
     if (showFullScreenPreview && selectedImageUri != null) {
@@ -495,18 +521,21 @@ fun MovieRequestScreen() {
                         Text("Google Search", fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 8.dp))
                         Button(onClick = { 
                             webViewInstance?.let { wv ->
-                                // Programmatically draw WebView content ONLY
-                                val bitmap = Bitmap.createBitmap(wv.width, wv.height, Bitmap.Config.ARGB_8888)
-                                val canvas = Canvas(bitmap)
-                                wv.draw(canvas)
-                                
-                                val file = File(context.cacheDir, "capture_${System.currentTimeMillis()}.png")
-                                FileOutputStream(file).use { out ->
-                                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                                try {
+                                    val bitmap = Bitmap.createBitmap(wv.width, wv.height, Bitmap.Config.ARGB_8888)
+                                    val canvas = Canvas(bitmap)
+                                    wv.draw(canvas)
+                                    
+                                    val file = File(context.cacheDir, "capture_${System.currentTimeMillis()}.png")
+                                    FileOutputStream(file).use { out ->
+                                        bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                                    }
+                                    selectedImageUri = Uri.fromFile(file)
+                                    showBrowser = false
+                                    Toast.makeText(context, "Screenshot Captured!", Toast.LENGTH_SHORT).show()
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Failed to capture screenshot", Toast.LENGTH_SHORT).show()
                                 }
-                                selectedImageUri = Uri.fromFile(file)
-                                showBrowser = false
-                                Toast.makeText(context, "Screenshot Captured!", Toast.LENGTH_SHORT).show()
                             }
                         }) {
                             Icon(Icons.Default.Screenshot, contentDescription = null)
@@ -521,14 +550,17 @@ fun MovieRequestScreen() {
                                 webViewClient = WebViewClient()
                                 settings.javaScriptEnabled = true
                                 webViewInstance = this
-                                val query = URLEncoder.encode(movieTitle, "UTF-8")
-                                loadUrl("https://www.google.com/search?q=$query")
+                                try {
+                                    val query = URLEncoder.encode(movieTitle, "UTF-8")
+                                    loadUrl("https://www.google.com/search?q=$query")
+                                } catch (e: Exception) {
+                                    loadUrl("https://www.google.com")
+                                }
                             }
                         },
                         modifier = Modifier.fillMaxSize().weight(1f)
                     )
                     
-                    // Instruction UI at the BOTTOM - avoids overlapping Google search bar
                     Card(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
                         elevation = CardDefaults.cardElevation(4.dp),
@@ -601,7 +633,7 @@ fun MovieRequestScreen() {
                     value = movieTitle,
                     onValueChange = { 
                         movieTitle = it
-                        if (it.isNotEmpty()) isSearchingTmdb = true // Immediate loading feedback
+                        if (it.isNotEmpty()) isSearchingTmdb = true
                         if (selectedTmdbMovie != null) selectedTmdbMovie = null 
                     },
                     label = { Text("Movie Title") },
@@ -621,7 +653,6 @@ fun MovieRequestScreen() {
                         }
                     }
                 )
-                // Added LinearProgressIndicator for extra visibility
                 if (isSearchingTmdb) {
                     LinearProgressIndicator(
                         modifier = Modifier
@@ -657,7 +688,7 @@ fun MovieRequestScreen() {
                                             movieTitle = movie.displayTitle
                                             selectedTmdbMovie = movie
                                             showDropdown = false
-                                            focusManager.clearFocus() // Closes keyboard
+                                            focusManager.clearFocus()
                                         }
                                         .padding(8.dp),
                                     verticalAlignment = Alignment.CenterVertically
@@ -683,7 +714,6 @@ fun MovieRequestScreen() {
         
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Selected Movie Details Card
         AnimatedVisibility(
             visible = selectedTmdbMovie != null,
             enter = expandVertically() + fadeIn(),
@@ -708,7 +738,7 @@ fun MovieRequestScreen() {
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
                                 movie.overview ?: "No description available.",
-                                fontSize = 13.sp, // Slightly bigger
+                                fontSize = 13.sp,
                                 lineHeight = 18.sp
                             )
                         }
@@ -727,7 +757,6 @@ fun MovieRequestScreen() {
         
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Manual Upload UI (Screenshot Section)
         if (selectedImageUri != null) {
             Card(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
@@ -773,17 +802,24 @@ fun MovieRequestScreen() {
                         Toast.makeText(context, "Please enter movie title", Toast.LENGTH_SHORT).show()
                         return@Button
                     }
+
+                    val pendingCount = previousRequests.count { it.status == "Pending" }
+                    if (pendingCount >= 3) {
+                        showLimitDialog = true
+                        return@Button
+                    }
+
                     isSubmitting = true
                     
                     fun saveToFirestore(finalScreenshotUrl: String = "") {
                         val tmdbID = selectedTmdbMovie?.id ?: 0
-                        val mediaType = selectedTmdbMovie?.media_type ?: "unknown"
+                        val mediaType = selectedTmdbMovie?.media_type ?: "movie"
                         val tmdbUrl = if (tmdbID != 0) {
                             if (mediaType == "tv") "https://www.themoviedb.org/tv/$tmdbID"
                             else "https://www.themoviedb.org/movie/$tmdbID"
                         } else ""
 
-                        val request = mapOf(
+                        val requestData = mapOf(
                             "userID" to (auth.currentUser?.uid ?: ""),
                             "firstName" to userFirstName,
                             "lastName" to userLastName,
@@ -799,14 +835,48 @@ fun MovieRequestScreen() {
                             "timestamp" to com.google.firebase.Timestamp.now(),
                             "status" to "Pending"
                         )
-                        db.collection("movie_requests").add(request)
-                            .addOnSuccessListener {
+                        db.collection("movie_requests").add(requestData)
+                            .addOnSuccessListener { docRef ->
+                                Toast.makeText(context, "Request submitted successfully!", Toast.LENGTH_LONG).show()
+                                
+                                // Safe Coroutine launch for background process
+                                CoroutineScope(Dispatchers.IO).launch {
+                                    val vidkingUrl = "https://vidking.net/embed/$mediaType/$tmdbID"
+                                    try {
+                                        val url = URL(vidkingUrl)
+                                        val connection = url.openConnection() as HttpURLConnection
+                                        connection.requestMethod = "HEAD"
+                                        connection.connectTimeout = 5000
+                                        connection.readTimeout = 5000
+                                        val responseCode = connection.responseCode
+                                        
+                                        if (responseCode == HttpURLConnection.HTTP_OK) {
+                                            delay(60000) // User requested 1 minute delay
+                                            
+                                            withContext(Dispatchers.Main) {
+                                                db.collection("movie_requests").document(docRef.id)
+                                                    .update("status", "Fulfilled")
+                                                
+                                                val videoData = mapOf(
+                                                    "userID" to (auth.currentUser?.uid ?: ""),
+                                                    "requestID" to docRef.id,
+                                                    "title" to movieTitle,
+                                                    "videoUrl" to vidkingUrl,
+                                                    "thumbnailUrl" to (selectedTmdbMovie?.fullBackdropUrl ?: selectedTmdbMovie?.fullPosterUrl ?: "")
+                                                )
+                                                db.collection("videos").add(videoData)
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e("AUTO_FULFILL", "Check failed: ${e.message}")
+                                    }
+                                }
+
                                 isSubmitting = false
                                 movieTitle = ""
                                 requestMsg = ""
                                 selectedTmdbMovie = null
                                 selectedImageUri = null
-                                Toast.makeText(context, "Request submitted successfully!", Toast.LENGTH_LONG).show()
                             }
                             .addOnFailureListener {
                                 isSubmitting = false
@@ -815,9 +885,8 @@ fun MovieRequestScreen() {
                     }
 
                     if (selectedImageUri != null) {
-                        // Upload screenshot to Cloudinary
                         MediaManager.get().upload(selectedImageUri)
-                            .unsigned("dxtv8m1l") // REPLACE THIS WITH YOUR UNSIGNED PRESET
+                            .unsigned("dxtv8m1l")
                             .callback(object : UploadCallback {
                                 override fun onStart(requestId: String) {}
                                 override fun onProgress(requestId: String, bytes: Long, totalBytes: Long) {}
@@ -826,7 +895,6 @@ fun MovieRequestScreen() {
                                     saveToFirestore(imageUrl)
                                 }
                                 override fun onError(requestId: String, error: ErrorInfo) {
-                                    Log.e("CLOUDINARY_ERROR", "Upload failed: ${error.description}")
                                     isSubmitting = false
                                     Toast.makeText(context, "Screenshot upload failed", Toast.LENGTH_SHORT).show()
                                 }
@@ -836,7 +904,15 @@ fun MovieRequestScreen() {
                         saveToFirestore("")
                     }
                 },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().pointerInput(Unit) {
+                    detectTapGestures(
+                        onLongPress = {
+                            val sharedPref = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+                            sharedPref.edit().clear().apply()
+                            Toast.makeText(context, "Preferences Cleared", Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                },
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Text(if (selectedImageUri != null) "Submit Request with Screenshot" else "Submit Request", fontWeight = FontWeight.Bold)
@@ -859,8 +935,19 @@ fun MovieRequestScreen() {
                             text = { Text("Are you sure you want to delete this request?") },
                             confirmButton = {
                                 TextButton(onClick = {
-                                    db.collection("movie_requests").document(req.id).delete()
+                                    val requestId = req.id
+                                    db.collection("movie_requests").document(requestId).delete()
                                         .addOnSuccessListener {
+                                            // Delete associated videos
+                                            db.collection("videos")
+                                                .whereEqualTo("requestID", requestId)
+                                                .get()
+                                                .addOnSuccessListener { snapshot ->
+                                                    for (document in snapshot.documents) {
+                                                        document.reference.delete()
+                                                    }
+                                                }
+                                            
                                             Toast.makeText(context, "Request deleted", Toast.LENGTH_SHORT).show()
                                             previousRequests.remove(req)
                                         }
@@ -886,7 +973,6 @@ fun MovieRequestScreen() {
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
                     ) {
                         Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            // Show poster or screenshot or placeholder
                             Box(modifier = Modifier.size(50.dp, 75.dp)) {
                                 val imageModel = if (req.posterUrl.isNotEmpty()) req.posterUrl else if (req.screenshotUrl.isNotEmpty()) req.screenshotUrl else null
                                 if (imageModel != null) {
@@ -996,40 +1082,46 @@ fun HomeScreen(
     var isLoading by remember { mutableStateOf(true) }
     var isRefreshing by remember { mutableStateOf(false) }
 
-    fun fetchVideos() {
+    DisposableEffect(currentUserId) {
         if (currentUserId.isNotEmpty()) {
-            db.collection("videos")
+            val query = db.collection("videos")
                 .whereEqualTo("userID", currentUserId)
-                .get()
-                .addOnSuccessListener { result ->
-                    videos.clear()
-                    for (document in result) {
-                        try {
-                            val video = document.toObject(Video::class.java).copy(id = document.id)
-                            videos.add(video)
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                        }
-                    }
+            
+            val listenerRegistration = query.addSnapshotListener { snapshot, error ->
+                if (error != null) {
                     isLoading = false
                     isRefreshing = false
+                    return@addSnapshotListener
                 }
-                .addOnFailureListener {
-                    isLoading = false
-                    isRefreshing = false
-                }
-        }
-    }
 
-    LaunchedEffect(currentUserId) {
-        fetchVideos()
+                if (snapshot != null) {
+                    val list = snapshot.documents.mapNotNull { doc ->
+                        doc.toObject(Video::class.java)?.copy(id = doc.id)
+                    }
+                    videos.clear()
+                    videos.addAll(list)
+                }
+                isLoading = false
+                isRefreshing = false
+            }
+            onDispose { listenerRegistration.remove() }
+        } else {
+            onDispose { }
+        }
     }
 
     PullToRefreshBox(
         isRefreshing = isRefreshing,
         onRefresh = {
             isRefreshing = true
-            fetchVideos()
+            // Snapshot listener handles the refresh, we just toggle isRefreshing
+            // But if we want to force refresh, we could potentially do something here
+            // However, listeners are real-time, so it's usually not needed.
+            // Just a small delay to simulate refresh if needed:
+            CoroutineScope(Dispatchers.Main).launch {
+                delay(1000)
+                isRefreshing = false
+            }
         },
         modifier = Modifier.fillMaxSize()
     ) {
@@ -1121,6 +1213,7 @@ fun VideoThumbnailItem(
     }
 }
 
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
 fun AdvancedExoPlayer(
     video: Video,
@@ -1129,37 +1222,281 @@ fun AdvancedExoPlayer(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    var isBuffering by remember { mutableStateOf(true) }
-    var isPlaying by remember { mutableStateOf(true) }
-    var showControls by remember { mutableStateOf(true) }
-    var resizeMode by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
-    var playbackProgress by remember { mutableFloatStateOf(0f) }
-    var currentTime by remember { mutableLongStateOf(0L) }
-    var totalDuration by remember { mutableLongStateOf(0L) }
-    var isLandscape by remember { mutableStateOf(false) }
+    val isVidking = video.videoUrl.contains("vidking.net")
 
-    val exoPlayer = remember {
-        ExoPlayer.Builder(context).build().apply {
-            val mediaItem = MediaItem.fromUri(video.videoUrl)
-            setMediaItem(mediaItem)
-            prepare()
-            playWhenReady = true
-            addListener(object : Player.Listener {
-                override fun onPlaybackStateChanged(state: Int) {
-                    isBuffering = state == Player.STATE_BUFFERING
-                    if (state == Player.STATE_READY) {
-                        totalDuration = duration
+    if (isVidking) {
+        VidkingPlayer(
+            video = video,
+            sharedTransitionScope = sharedTransitionScope,
+            animatedVisibilityScope = animatedVisibilityScope,
+            onBack = onBack
+        )
+    } else {
+        val lifecycleOwner = LocalLifecycleOwner.current
+        var isBuffering by remember { mutableStateOf(true) }
+        var isPlaying by remember { mutableStateOf(true) }
+        var showControls by remember { mutableStateOf(true) }
+        var resizeMode by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
+        var playbackProgress by remember { mutableFloatStateOf(0f) }
+        var currentTime by remember { mutableLongStateOf(0L) }
+        var totalDuration by remember { mutableLongStateOf(0L) }
+        var isLandscape by remember { mutableStateOf(false) }
+
+        val exoPlayer = remember {
+            ExoPlayer.Builder(context).build().apply {
+                val mediaItem = MediaItem.fromUri(video.videoUrl)
+                setMediaItem(mediaItem)
+                prepare()
+                playWhenReady = true
+                addListener(object : Player.Listener {
+                    override fun onPlaybackStateChanged(state: Int) {
+                        isBuffering = state == Player.STATE_BUFFERING
+                        if (state == Player.STATE_READY) {
+                            totalDuration = duration
+                        }
+                    }
+                    override fun onIsPlayingChanged(playing: Boolean) {
+                        isPlaying = playing
+                    }
+                })
+            }
+        }
+
+        fun toggleSystemUI(landscape: Boolean) {
+            val window = (context as? Activity)?.window ?: return
+            val controller = WindowInsetsControllerCompat(window, window.decorView)
+            if (landscape) {
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+                controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            } else {
+                controller.show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+
+        LaunchedEffect(isLandscape) {
+            toggleSystemUI(isLandscape)
+        }
+
+        DisposableEffect(lifecycleOwner) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_PAUSE) {
+                    exoPlayer.pause()
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose {
+                lifecycleOwner.lifecycle.removeObserver(observer)
+            }
+        }
+
+        LaunchedEffect(isPlaying) {
+            while (true) {
+                if (isPlaying) {
+                    currentTime = exoPlayer.currentPosition
+                    playbackProgress = if (totalDuration > 0) {
+                        currentTime.toFloat() / totalDuration
+                    } else 0f
+                }
+                delay(500)
+            }
+        }
+
+        BackHandler {
+            if (isLandscape) {
+                isLandscape = false
+                (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            } else {
+                onBack()
+            }
+        }
+
+        LaunchedEffect(showControls) {
+            if (showControls) {
+                delay(5000)
+                showControls = false
+            }
+        }
+
+        DisposableEffect(Unit) {
+            onDispose {
+                exoPlayer.release()
+                toggleSystemUI(false)
+                (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            }
+        }
+
+        fun formatTime(ms: Long): String {
+            val totalSeconds = ms / 1000
+            val minutes = totalSeconds / 60
+            val seconds = totalSeconds % 60
+            return String.format(Locale.getDefault(), "%d:%02d", minutes, seconds)
+        }
+
+        with(sharedTransitionScope) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black)
+                    .sharedElement(
+                        rememberSharedContentState(key = "video_${video.id}"),
+                        animatedVisibilityScope = animatedVisibilityScope
+                    )
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onTap = { showControls = !showControls },
+                            onDoubleTap = { offset ->
+                                val width = size.width
+                                if (offset.x < width / 2) {
+                                    exoPlayer.seekBack()
+                                } else {
+                                    exoPlayer.seekForward()
+                                }
+                            }
+                        )
+                    }
+            ) {
+                AndroidView(
+                    factory = {
+                        PlayerView(it).apply {
+                            player = exoPlayer
+                            useController = false
+                            // Using TextureView can fix surface issues on some devices (MTK chips)
+                            // where SurfaceView causes a black screen or "Null anb" errors.
+                            @Suppress("DEPRECATION")
+                            setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                            this.resizeMode = resizeMode
+                            layoutParams = FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                        }
+                    },
+                    update = { 
+                        it.resizeMode = resizeMode
+                    },
+                    modifier = Modifier.fillMaxSize().align(Alignment.Center)
+                )
+
+                if (isBuffering) {
+                    CircularProgressIndicator(
+                        color = Color.Red,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                }
+
+                AnimatedVisibility(
+                    visible = showControls,
+                    enter = fadeIn(),
+                    exit = fadeOut()
+                ) {
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .align(Alignment.TopCenter)
+                                .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.7f), Color.Transparent)))
+                                .padding(top = if(isLandscape) 16.dp else 48.dp, start = 16.dp, end = 16.dp, bottom = 16.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(onClick = {
+                                    if (isLandscape) {
+                                        isLandscape = false
+                                        (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                                    } else {
+                                        onBack()
+                                    }
+                                }) {
+                                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                                }
+                                Text(
+                                    video.title,
+                                    color = Color.White,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    modifier = Modifier.padding(start = 8.dp).weight(1f)
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.align(Alignment.Center),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(24.dp)
+                        ) {
+                            IconButton(onClick = { exoPlayer.seekBack() }, modifier = Modifier.size(48.dp)) {
+                                Icon(Icons.Default.Replay10, contentDescription = null, tint = Color.White, modifier = Modifier.fillMaxSize())
+                            }
+                            
+                            Surface(
+                                shape = CircleShape,
+                                color = Color.White.copy(alpha = 0.2f),
+                                modifier = Modifier.size(84.dp).clickable { if (isPlaying) exoPlayer.pause() else exoPlayer.play() }
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(48.dp)
+                                    )
+                                }
+                            }
+
+                            IconButton(onClick = { exoPlayer.seekForward() }, modifier = Modifier.size(48.dp)) {
+                                Icon(Icons.Default.Forward10, contentDescription = null, tint = Color.White, modifier = Modifier.fillMaxSize())
+                            }
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .align(Alignment.BottomCenter)
+                                .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.8f))))
+                                .padding(bottom = if(isLandscape) 16.dp else 32.dp, start = 16.dp, end = 16.dp)
+                        ) {
+                            Column {
+                                Slider(
+                                    value = playbackProgress,
+                                    onValueChange = {
+                                        playbackProgress = it
+                                        exoPlayer.seekTo((it * totalDuration).toLong())
+                                    },
+                                    modifier = Modifier.fillMaxWidth().height(24.dp),
+                                    colors = SliderDefaults.colors(thumbColor = Color.Red, activeTrackColor = Color.Red)
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("${formatTime(currentTime)} / ${formatTime(totalDuration)}", color = Color.White, fontSize = 12.sp)
+                                    Spacer(modifier = Modifier.weight(1f))
+                                    IconButton(onClick = {
+                                        isLandscape = !isLandscape
+                                        (context as? Activity)?.requestedOrientation = if (isLandscape) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                                    }) {
+                                        Icon(if (isLandscape) Icons.Default.FullscreenExit else Icons.Default.ScreenRotation, contentDescription = null, tint = Color.White)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-                override fun onIsPlayingChanged(playing: Boolean) {
-                    isPlaying = playing
-                }
-            })
+            }
         }
     }
+}
 
-    // Function to handle Immersive Mode
+@Composable
+fun VidkingPlayer(
+    video: Video,
+    sharedTransitionScope: SharedTransitionScope,
+    animatedVisibilityScope: AnimatedVisibilityScope,
+    onBack: () -> Unit
+) {
+    val context = LocalContext.current
+    var isLandscape by remember { mutableStateOf(false) }
+
     fun toggleSystemUI(landscape: Boolean) {
         val window = (context as? Activity)?.window ?: return
         val controller = WindowInsetsControllerCompat(window, window.decorView)
@@ -1175,31 +1512,6 @@ fun AdvancedExoPlayer(
         toggleSystemUI(isLandscape)
     }
 
-    // Background Play Off logic
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE) {
-                exoPlayer.pause()
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-        }
-    }
-
-    LaunchedEffect(isPlaying) {
-        while (true) {
-            if (isPlaying) {
-                currentTime = exoPlayer.currentPosition
-                playbackProgress = if (totalDuration > 0) {
-                    currentTime.toFloat() / totalDuration
-                } else 0f
-            }
-            delay(500)
-        }
-    }
-
     BackHandler {
         if (isLandscape) {
             isLandscape = false
@@ -1209,26 +1521,11 @@ fun AdvancedExoPlayer(
         }
     }
 
-    LaunchedEffect(showControls) {
-        if (showControls) {
-            delay(5000)
-            showControls = false
-        }
-    }
-
     DisposableEffect(Unit) {
         onDispose {
-            exoPlayer.release()
             toggleSystemUI(false)
             (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
-    }
-
-    fun formatTime(ms: Long): String {
-        val totalSeconds = ms / 1000
-        val minutes = totalSeconds / 60
-        val seconds = totalSeconds % 60
-        return String.format(Locale.getDefault(), "%d:%02d", minutes, seconds)
     }
 
     with(sharedTransitionScope) {
@@ -1240,205 +1537,59 @@ fun AdvancedExoPlayer(
                     rememberSharedContentState(key = "video_${video.id}"),
                     animatedVisibilityScope = animatedVisibilityScope
                 )
-                .pointerInput(Unit) {
-                    detectTapGestures(
-                        onTap = { showControls = !showControls },
-                        onDoubleTap = { offset ->
-                            val width = size.width
-                            if (offset.x < width / 2) {
-                                exoPlayer.seekBack()
-                            } else {
-                                exoPlayer.seekForward()
-                            }
-                        }
-                    )
-                }
         ) {
             AndroidView(
-                factory = {
-                    PlayerView(it).apply {
-                        player = exoPlayer
-                        useController = false
-                        this.resizeMode = resizeMode
-                        layoutParams = FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
-                        )
-                    }
-                },
-                update = { it.resizeMode = resizeMode },
-                modifier = Modifier.fillMaxSize().align(Alignment.Center)
-            )
-
-            if (isBuffering) {
-                CircularProgressIndicator(
-                    color = Color.Red,
-                    modifier = Modifier.align(Alignment.Center)
-                )
-            }
-
-            AnimatedVisibility(
-                visible = showControls,
-                enter = fadeIn(),
-                exit = fadeOut()
-            ) {
-                Box(modifier = Modifier.fillMaxSize()) {
-                    // Top Bar - Modern Gradient
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .align(Alignment.TopCenter)
-                            .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.7f), Color.Transparent)))
-                            .padding(top = if(isLandscape) 16.dp else 48.dp, start = 16.dp, end = 16.dp, bottom = 16.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = {
-                                if (isLandscape) {
-                                    isLandscape = false
-                                    (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                                } else {
-                                    onBack()
-                                }
-                            }) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
-                            }
-                            Text(
-                                video.title,
-                                color = Color.White,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                modifier = Modifier.padding(start = 8.dp).weight(1f)
-                            )
-                            Surface(
-                                color = Color.White.copy(alpha = 0.2f),
-                                shape = RoundedCornerShape(4.dp),
-                                modifier = Modifier.padding(end = 8.dp)
-                            ) {
-                                Text("4K", color = Color.White, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                            }
-                        }
-                    }
-
-                    // Center Controls - Premium Feel
-                    Row(
-                        modifier = Modifier.align(Alignment.Center),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(24.dp)
-                    ) {
-                        // 20s Replay
-                        IconButton(onClick = { exoPlayer.seekTo(exoPlayer.currentPosition - 20000) }, modifier = Modifier.size(40.dp)) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(Icons.Default.Replay, contentDescription = null, tint = Color.White, modifier = Modifier.size(32.dp))
-                                Text("20", color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
-                            }
-                        }
-
-                        // 10s Replay
-                        IconButton(onClick = { exoPlayer.seekBack() }, modifier = Modifier.size(48.dp)) {
-                            Icon(Icons.Default.Replay10, contentDescription = null, tint = Color.White, modifier = Modifier.fillMaxSize())
+                factory = { ctx ->
+                    WebView(ctx).apply {
+                        settings.apply {
+                            javaScriptEnabled = true
+                            domStorageEnabled = true
+                            mediaPlaybackRequiresUserGesture = false
+                            cacheMode = WebSettings.LOAD_DEFAULT
+                            userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                         }
                         
-                        Surface(
-                            shape = CircleShape,
-                            color = Color.White.copy(alpha = 0.2f),
-                            modifier = Modifier.size(84.dp).clickable { if (isPlaying) exoPlayer.pause() else exoPlayer.play() }
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                    contentDescription = null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(48.dp)
-                                )
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+                                return if (url?.contains("vidking.net") == true) false else true
                             }
                         }
-
-                        // 10s Forward
-                        IconButton(onClick = { exoPlayer.seekForward() }, modifier = Modifier.size(48.dp)) {
-                            Icon(Icons.Default.Forward10, contentDescription = null, tint = Color.White, modifier = Modifier.fillMaxSize())
-                        }
-
-                        // 20s Forward
-                        IconButton(onClick = { exoPlayer.seekTo(exoPlayer.currentPosition + 20000) }, modifier = Modifier.size(40.dp)) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(Icons.Default.Refresh, contentDescription = null, tint = Color.White, modifier = Modifier.size(32.dp).rotate(180f))
-                                Text("20", color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
-                            }
-                        }
+                        webChromeClient = WebChromeClient()
+                        loadUrl(video.videoUrl)
                     }
+                },
+                modifier = Modifier.fillMaxSize()
+            )
 
-                    // Bottom Controls - Netflix Style
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .align(Alignment.BottomCenter)
-                            .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.8f))))
-                            .padding(bottom = if(isLandscape) 16.dp else 32.dp, start = 16.dp, end = 16.dp)
-                    ) {
-                        Column {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(formatTime(currentTime), color = Color.White, fontSize = 12.sp)
-                                Text(formatTime(totalDuration), color = Color.White, fontSize = 12.sp)
-                            }
-                            
-                            Slider(
-                                value = playbackProgress,
-                                onValueChange = {
-                                    playbackProgress = it
-                                    exoPlayer.seekTo((it * totalDuration).toLong())
-                                },
-                                modifier = Modifier.fillMaxWidth().height(24.dp),
-                                colors = SliderDefaults.colors(
-                                    thumbColor = Color.Red,
-                                    activeTrackColor = Color.Red,
-                                    inactiveTrackColor = Color.White.copy(alpha = 0.3f)
-                                )
-                            )
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(Icons.Default.VolumeUp, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
-                                Spacer(modifier = Modifier.width(16.dp))
-                                Icon(Icons.Default.Settings, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
-                                Spacer(modifier = Modifier.weight(1f))
-                                IconButton(onClick = {
-                                    isLandscape = !isLandscape
-                                    val activity = context as? Activity
-                                    if (isLandscape) {
-                                        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-                                    } else {
-                                        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                                    }
-                                }) {
-                                    Icon(
-                                        if (isLandscape) Icons.Default.FullscreenExit else Icons.Default.ScreenRotation,
-                                        contentDescription = "Rotate",
-                                        tint = Color.White
-                                    )
-                                }
-                                IconButton(onClick = {
-                                    resizeMode = if (resizeMode == AspectRatioFrameLayout.RESIZE_MODE_FIT) {
-                                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                                    } else {
-                                        AspectRatioFrameLayout.RESIZE_MODE_FIT
-                                    }
-                                }) {
-                                    Icon(
-                                        if (resizeMode == AspectRatioFrameLayout.RESIZE_MODE_FIT) Icons.Default.Fullscreen else Icons.Default.FullscreenExit,
-                                        contentDescription = null,
-                                        tint = Color.White
-                                    )
-                                }
-                            }
-                        }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.TopStart)
+                    .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.6f), Color.Transparent)))
+                    .padding(top = if(isLandscape) 16.dp else 48.dp, start = 16.dp, end = 16.dp, bottom = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = {
+                    if (isLandscape) {
+                        isLandscape = false
+                        (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                    } else {
+                        onBack()
                     }
+                }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                }
+                Text(
+                    video.title,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(start = 8.dp).weight(1f)
+                )
+                IconButton(onClick = {
+                    isLandscape = !isLandscape
+                    (context as? Activity)?.requestedOrientation = if (isLandscape) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                }) {
+                    Icon(Icons.Default.ScreenRotation, contentDescription = "Rotate", tint = Color.White)
                 }
             }
         }
@@ -1459,7 +1610,7 @@ fun SettingTab(
     } else {
         SettingList(
             isDarkMode = isDarkMode,
-            onThemeChange = onThemeChange,
+            onThemeChange = { onThemeChange(it) },
             onCheckUpdates = { onCheckUpdates() }, 
             onSettingInfoClick = { showSettingInfo = true }, 
             onLogout = onLogout
