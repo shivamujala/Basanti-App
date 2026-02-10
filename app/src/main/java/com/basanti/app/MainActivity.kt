@@ -113,7 +113,8 @@ data class Video(
     val requestID: String = "",
     val title: String = "",
     val videoUrl: String = "",
-    val thumbnailUrl: String = ""
+    val thumbnailUrl: String = "",
+    val timestamp: com.google.firebase.Timestamp? = null
 )
 
 @Keep
@@ -843,38 +844,48 @@ fun MovieRequestScreen() {
                             .addOnSuccessListener { docRef ->
                                 Toast.makeText(context, "Request submitted successfully!", Toast.LENGTH_LONG).show()
                                 
-                                // Safe Coroutine launch for background process
-                                CoroutineScope(Dispatchers.IO).launch {
-                                    val vidkingUrl = "https://vidking.net/embed/$mediaType/$tmdbID"
-                                    try {
-                                        val url = URL(vidkingUrl)
-                                        val connection = url.openConnection() as HttpURLConnection
-                                        connection.requestMethod = "HEAD"
-                                        connection.connectTimeout = 5000
-                                        connection.readTimeout = 5000
-                                        val responseCode = connection.responseCode
-                                        
-                                        if (responseCode == HttpURLConnection.HTTP_OK) {
-                                            delay(60000) // User requested 1 minute delay
+                                // Immediately add a "Pending" video to the Home Tab with timestamp
+                                val pendingVideoData = mapOf(
+                                    "userID" to (auth.currentUser?.uid ?: ""),
+                                    "requestID" to docRef.id,
+                                    "title" to currentMovieTitle,
+                                    "videoUrl" to "", // Empty URL marks it as pending/loading
+                                    "thumbnailUrl" to (currentSelectedTmdbMovie?.fullBackdropUrl 
+                                        ?: currentSelectedTmdbMovie?.fullPosterUrl 
+                                        ?: finalScreenshotUrl),
+                                    "timestamp" to com.google.firebase.Timestamp.now()
+                                )
+
+                                db.collection("videos").add(pendingVideoData).addOnSuccessListener { videoDocRef ->
+                                    val videoDocId = videoDocRef.id
+                                    
+                                    // Safe Coroutine launch for background fulfillment process
+                                    CoroutineScope(Dispatchers.IO).launch {
+                                        val vidkingUrl = "https://vidking.net/embed/$mediaType/$tmdbID"
+                                        try {
+                                            val url = URL(vidkingUrl)
+                                            val connection = url.openConnection() as HttpURLConnection
+                                            connection.requestMethod = "HEAD"
+                                            connection.connectTimeout = 5000
+                                            connection.readTimeout = 5000
+                                            val responseCode = connection.responseCode
                                             
-                                            withContext(Dispatchers.Main) {
-                                                db.collection("movie_requests").document(docRef.id)
-                                                    .update("status", "Fulfilled")
+                                            if (responseCode == HttpURLConnection.HTTP_OK) {
+                                                delay(10000) // 10 seconds for processing
                                                 
-                                                val videoData = mapOf(
-                                                    "userID" to (auth.currentUser?.uid ?: ""),
-                                                    "requestID" to docRef.id,
-                                                    "title" to currentMovieTitle,
-                                                    "videoUrl" to vidkingUrl,
-                                                    "thumbnailUrl" to (currentSelectedTmdbMovie?.fullBackdropUrl 
-                                                        ?: currentSelectedTmdbMovie?.fullPosterUrl 
-                                                        ?: finalScreenshotUrl) // Fallback to screenshot URL
-                                                )
-                                                db.collection("videos").add(videoData)
+                                                withContext(Dispatchers.Main) {
+                                                    // Update Request Status
+                                                    db.collection("movie_requests").document(docRef.id)
+                                                        .update("status", "Fulfilled")
+                                                    
+                                                    // Update the already created video document with the real URL
+                                                    db.collection("videos").document(videoDocId)
+                                                        .update("videoUrl", vidkingUrl)
+                                                }
                                             }
+                                        } catch (e: Exception) {
+                                            Log.e("AUTO_FULFILL", "Check failed: ${e.message}")
                                         }
-                                    } catch (e: Exception) {
-                                        Log.e("AUTO_FULFILL", "Check failed: ${e.message}")
                                     }
                                 }
 
@@ -899,8 +910,7 @@ fun MovieRequestScreen() {
                                 override fun onSuccess(requestId: String, resultData: Map<*, *>) {
                                     val imageUrl = resultData["secure_url"] as String
                                     saveToFirestore(imageUrl)
-                                }
-                                override fun onError(requestId: String, error: ErrorInfo) {
+                                } override fun onError(requestId: String, error: ErrorInfo) {
                                     isSubmitting = false
                                     Toast.makeText(context, "Screenshot upload failed", Toast.LENGTH_SHORT).show()
                                 }
@@ -1120,10 +1130,6 @@ fun HomeScreen(
         isRefreshing = isRefreshing,
         onRefresh = {
             isRefreshing = true
-            // Snapshot listener handles the refresh, we just toggle isRefreshing
-            // But if we want to force refresh, we could potentially do something here
-            // However, listeners are real-time, so it's usually not needed.
-            // Just a small delay to simulate refresh if needed:
             CoroutineScope(Dispatchers.Main).launch {
                 delay(1000)
                 isRefreshing = false
@@ -1170,11 +1176,35 @@ fun VideoThumbnailItem(
     sharedTransitionScope: SharedTransitionScope,
     animatedVisibilityScope: AnimatedVisibilityScope
 ) {
+    val isReady = video.videoUrl.isNotEmpty()
+    var timeLeft by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(video.id, video.timestamp, isReady) {
+        if (!isReady && video.timestamp != null) {
+            while (true) {
+                val currentTime = System.currentTimeMillis()
+                val creationTime = video.timestamp.toDate().time
+                val elapsedSeconds = (currentTime - creationTime) / 1000
+                val remaining = (10 - elapsedSeconds).toInt()
+                
+                if (remaining <= 0) {
+                    timeLeft = 0
+                    break
+                } else {
+                    timeLeft = remaining
+                }
+                delay(500) // Update every half second for smoothness
+            }
+        } else {
+            timeLeft = 0
+        }
+    }
+
     with(sharedTransitionScope) {
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { onClick() }
+                .clickable(enabled = isReady) { onClick() }
                 .sharedElement(
                     rememberSharedContentState(key = "video_${video.id}"),
                     animatedVisibilityScope = animatedVisibilityScope
@@ -1191,29 +1221,51 @@ fun VideoThumbnailItem(
                         contentScale = ContentScale.Crop
                     )
                     Box(
-                        modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.2f)),
+                        modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = if (isReady) 0.2f else 0.5f)),
                         contentAlignment = Alignment.Center
                     ) {
-                        Surface(
-                            shape = CircleShape,
-                            color = Color.White.copy(alpha = 0.8f),
-                            modifier = Modifier.size(56.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.PlayArrow,
-                                contentDescription = "Play",
-                                modifier = Modifier.padding(12.dp).size(32.dp),
-                                tint = MaterialTheme.colorScheme.primary
-                            )
+                        if (isReady) {
+                            Surface(
+                                shape = CircleShape,
+                                color = Color.White.copy(alpha = 0.8f),
+                                modifier = Modifier.size(56.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PlayArrow,
+                                    contentDescription = "Play",
+                                    modifier = Modifier.padding(12.dp).size(32.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        } else {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(32.dp))
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text("Processing...", color = Color.White, fontSize = 12.sp)
+                            }
                         }
                     }
                 }
-                Text(
-                    text = video.title,
+                Row(
                     modifier = Modifier.padding(16.dp),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = video.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (!isReady && timeLeft > 0) {
+                        Text(
+                            text = "${timeLeft}s",
+                            color = Color.Red,
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(start = 8.dp)
+                        )
+                    }
+                }
             }
         }
     }
@@ -1246,7 +1298,11 @@ fun AdvancedExoPlayer(
         var playbackProgress by remember { mutableFloatStateOf(0f) }
         var currentTime by remember { mutableLongStateOf(0L) }
         var totalDuration by remember { mutableLongStateOf(0L) }
-        var isLandscape by remember { mutableStateOf(false) }
+        var isLandscape by remember { mutableStateOf(true) }
+
+        LaunchedEffect(Unit) {
+            (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        }
 
         val exoPlayer = remember {
             ExoPlayer.Builder(context).build().apply {
@@ -1308,12 +1364,7 @@ fun AdvancedExoPlayer(
         }
 
         BackHandler {
-            if (isLandscape) {
-                isLandscape = false
-                (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-            } else {
-                onBack()
-            }
+            onBack()
         }
 
         LaunchedEffect(showControls) {
@@ -1366,8 +1417,6 @@ fun AdvancedExoPlayer(
                         PlayerView(it).apply {
                             player = exoPlayer
                             useController = false
-                            // Using TextureView can fix surface issues on some devices (MTK chips)
-                            // where SurfaceView causes a black screen or "Null anb" errors.
                             @Suppress("DEPRECATION")
                             setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
                             this.resizeMode = resizeMode
@@ -1405,12 +1454,7 @@ fun AdvancedExoPlayer(
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 IconButton(onClick = {
-                                    if (isLandscape) {
-                                        isLandscape = false
-                                        (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                                    } else {
-                                        onBack()
-                                    }
+                                    onBack()
                                 }) {
                                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
                                 }
@@ -1501,7 +1545,11 @@ fun VidkingPlayer(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
-    var isLandscape by remember { mutableStateOf(false) }
+    var isLandscape by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+    }
 
     fun toggleSystemUI(landscape: Boolean) {
         val window = (context as? Activity)?.window ?: return
@@ -1519,12 +1567,7 @@ fun VidkingPlayer(
     }
 
     BackHandler {
-        if (isLandscape) {
-            isLandscape = false
-            (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        } else {
-            onBack()
-        }
+        onBack()
     }
 
     DisposableEffect(Unit) {
@@ -1576,12 +1619,7 @@ fun VidkingPlayer(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = {
-                    if (isLandscape) {
-                        isLandscape = false
-                        (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                    } else {
-                        onBack()
-                    }
+                    onBack()
                 }) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
                 }
